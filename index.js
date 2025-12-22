@@ -1,0 +1,96 @@
+import {randomUUID} from 'node:crypto';
+
+import {loadMcpTools} from '@langchain/mcp-adapters';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import textLD from 'text-ld';
+
+import _pkg from './package.json' with {type: 'json'};
+import AgentService from './agent.js';
+
+const MIN_QUERY_LENGTH = 2;
+const MAX_QUERY_LENGTH = 256;
+
+export default class SecretaryAI {
+  constructor(mcpServerUrl, model, lang) {
+    this.url = mcpServerUrl;
+    this.model = model;
+    this.lang = lang;
+    this.threadId = randomUUID();
+  }
+
+  get timeZone() {
+    return process.env.TZ ?? 'UTC';
+  }
+
+  get system() {
+    const currentDate = new Intl.DateTimeFormat(this.lang, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      hour12: false,
+      timeZone: this.timeZone,
+    }).format(new Date());
+
+    return `
+        Ты — Виртуальный Секретарь
+        :: Инструкции:
+        - Если данных недостаточно — уточни их у пользователя. НЕ выдумывай информацию
+        - Если инструмент вернул id_task, извлекай его и используй в последующих вызовах
+        - После каждого вызова инструмента кратко проверь результат (1-2 предложения) и продолжай только если всё корректно. При ошибке — опиши проблему и предприми попытку минимальной коррекции
+        Контекст:
+        - Текущее время ${this.timeZone}: ${currentDate}
+        :: Используй только доступные инструменты согласно allowed_tools. Не совершай разрушительных действий без подтверждения пользователя.
+        `
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  async connect(serverName, headers) {
+    const client = new Client({
+      name: _pkg.name,
+      version: _pkg.version,
+    });
+    const transport = new StreamableHTTPClientTransport(this.url, {
+      requestInit: {
+        headers: headers,
+      },
+    });
+    await client.connect(transport);
+    const tools = await loadMcpTools(serverName, client, {
+      throwOnLoadError: true,
+      prefixToolNameWithServerName: false,
+      additionalToolNamePrefix: '',
+      useStandardContentBlocks: false,
+    });
+    this.agent = new AgentService(this.model, tools, this.system);
+  }
+
+  async chat(query, context) {
+    if (query.length <= MIN_QUERY_LENGTH) {
+      throw new Error('Запрос не должен быть пустым');
+    }
+    if (query.length > MAX_QUERY_LENGTH) {
+      throw new Error(`Запрос должен быть не более ${MAX_QUERY_LENGTH} символов`);
+    }
+    const {text} = await textLD.creativeWork(query, this.timeZone);
+
+    const {messages} = await this.agent.execute({
+      input: text,
+    }, {
+      configurable: {
+        thread_id: this.threadId,
+      },
+      context: context,
+    });
+
+    return {
+      content: [{
+        type: 'text',
+        text: messages[messages.length - 1].content,
+      }],
+    };
+  }
+}
