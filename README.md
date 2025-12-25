@@ -1,0 +1,14 @@
+# Secretary AI SDK
+
+## Installation
+
+ENV:
+
+```shell
+YC_API_KEY
+YC_IAM_TOKEN
+
+SECRETARY_MCP_URL
+SECRETARY_LOGIN
+SECRETARY_PASSWORD
+```

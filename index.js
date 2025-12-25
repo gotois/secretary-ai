@@ -12,6 +12,11 @@ const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 256;
 
 export default class SecretaryAI {
+  #client = new Client({
+    name: _pkg.name,
+    version: _pkg.version,
+  });
+
   constructor(mcpServerUrl, model, lang) {
     this.url = mcpServerUrl;
     this.model = model;
@@ -19,12 +24,16 @@ export default class SecretaryAI {
     this.threadId = randomUUID();
   }
 
+  get client() {
+    return this.#client;
+  }
+
   get timeZone() {
     return process.env.TZ ?? 'UTC';
   }
 
-  get system() {
-    const currentDate = new Intl.DateTimeFormat(this.lang, {
+  get currentDate() {
+    return new Intl.DateTimeFormat(this.lang, {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
@@ -33,7 +42,9 @@ export default class SecretaryAI {
       hour12: false,
       timeZone: this.timeZone,
     }).format(new Date());
+  }
 
+  get systemPrompt() {
     return `
         Ты — Виртуальный Секретарь
         :: Инструкции:
@@ -41,7 +52,7 @@ export default class SecretaryAI {
         - Если инструмент вернул id_task, извлекай его и используй в последующих вызовах
         - После каждого вызова инструмента кратко проверь результат (1-2 предложения) и продолжай только если всё корректно. При ошибке — опиши проблему и предприми попытку минимальной коррекции
         Контекст:
-        - Текущее время ${this.timeZone}: ${currentDate}
+        - Текущее время ${this.timeZone}: ${this.currentDate}
         :: Используй только доступные инструменты согласно allowed_tools. Не совершай разрушительных действий без подтверждения пользователя.
         `
       .replace(/\s+/g, ' ')
@@ -49,23 +60,19 @@ export default class SecretaryAI {
   }
 
   async connect(serverName, headers) {
-    const client = new Client({
-      name: _pkg.name,
-      version: _pkg.version,
-    });
     const transport = new StreamableHTTPClientTransport(this.url, {
       requestInit: {
         headers: headers,
       },
     });
-    await client.connect(transport);
-    const tools = await loadMcpTools(serverName, client, {
+    await this.client.connect(transport);
+    this.tools = await loadMcpTools(serverName, this.client, {
       throwOnLoadError: true,
       prefixToolNameWithServerName: false,
       additionalToolNamePrefix: '',
       useStandardContentBlocks: false,
     });
-    this.agent = new AgentService(this.model, tools, this.system);
+    this.agent = new AgentService(this.model, this.tools, this.systemPrompt);
   }
 
   async chat(query, context) {

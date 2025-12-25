@@ -9,10 +9,10 @@
     "@langchain/core": "1.1.8",
     "@langchain/mcp-adapters": "1.1.1",
     "@modelcontextprotocol/sdk": "1.25.1",
-    "langchain-yandexgpt": "0.0.8",
     "text-ld": "0.0.11"
   },
   "devDependencies": {
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "langchain-yandexgpt": "^0.0.8"
   }
 }
