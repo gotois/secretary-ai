@@ -1,8 +1,11 @@
 import {randomUUID} from 'node:crypto';
 
+import {DynamicStructuredTool} from "@langchain/core/tools";
+import {ToolMessage} from "@langchain/core/messages";
 import {loadMcpTools} from '@langchain/mcp-adapters';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {z} from 'zod';
 import textLD from 'text-ld';
 
 import _pkg from './package.json' with {type: 'json'};
@@ -22,6 +25,7 @@ export default class SecretaryAI {
     this.model = model;
     this.lang = lang;
     this.threadId = randomUUID();
+    this.tools = [];
   }
 
   get client() {
@@ -66,12 +70,36 @@ export default class SecretaryAI {
       },
     });
     await this.client.connect(transport);
-    this.tools = await loadMcpTools(serverName, this.client, {
+    const tools = await loadMcpTools(serverName, this.client, {
       throwOnLoadError: true,
       prefixToolNameWithServerName: false,
       additionalToolNamePrefix: '',
       useStandardContentBlocks: false,
     });
+    for (const tool of tools) {
+      // todo - поставил для теста
+      // if (tool.name !== 'show-task') {
+      //   continue;
+      // }
+      const t = new DynamicStructuredTool({
+        name: tool.name,
+        description: tool.description,
+        schema: new z.Schema(tool.schema),
+        func: async (args) => {
+          const {content, artifact = {}} = await this.client.callTool({
+            name: tool.name,
+            arguments: args,
+          });
+          return new ToolMessage({
+            name: tool.name,
+            content: content?.[0]?.text || "Данные отсутствуют",
+            artifact: artifact
+          });
+        },
+      });
+      this.tools.push(t);
+    }
+
     this.agent = new AgentService(this.model, this.tools, this.systemPrompt);
   }
 
