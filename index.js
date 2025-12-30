@@ -53,8 +53,7 @@ export default class SecretaryAI {
         Ты — Виртуальный Секретарь
         :: Инструкции:
         - Если данных недостаточно — уточни их у пользователя. НЕ выдумывай информацию
-        - Если инструмент вернул id_task, извлекай его и используй в последующих вызовах
-        - После каждого вызова инструмента кратко проверь результат (1-2 предложения) и продолжай только если всё корректно. При ошибке — опиши проблему и предприми попытку минимальной коррекции
+        - После каждого вызова инструмента кратко проверь результат (1-2 предложения) и продолжай только если всё корректно
         Контекст:
         - Текущее время ${this.timeZone}: ${this.currentDate}
         :: Используй только доступные инструменты согласно allowed_tools. Не совершай разрушительных действий без подтверждения пользователя.
@@ -92,8 +91,8 @@ export default class SecretaryAI {
           });
           return new ToolMessage({
             name: tool.name,
-            content: content?.[0]?.text || "Данные отсутствуют",
-            artifact: artifact
+            content: content?.[0]?.text || 'Данные отсутствуют',
+            artifact: artifact,
           });
         },
       });
@@ -112,7 +111,7 @@ export default class SecretaryAI {
     }
     const {text} = await textLD.creativeWork(query, this.timeZone);
 
-    const {messages} = await this.agent.execute({
+    const {messages, artifact} = await this.agent.execute({
       input: text,
     }, {
       configurable: {
@@ -126,6 +125,7 @@ export default class SecretaryAI {
         type: 'text',
         text: messages[messages.length - 1].content,
       }],
+      artifact: artifact,
     };
   }
 }

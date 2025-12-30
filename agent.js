@@ -1,7 +1,6 @@
 import {MessagesAnnotation, Command, Annotation, StateGraph} from '@langchain/langgraph';
 import {AIMessage} from '@langchain/core/messages';
 import {ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate} from '@langchain/core/prompts';
-
 import {ToolNode, toolsCondition} from '@langchain/langgraph/prebuilt';
 
 import {SchemaMemory} from './memory.js';
@@ -26,12 +25,13 @@ export default class AgentService {
     }
     this.tools = tools;
     this.systemPrompt = systemPrompt;
-    this.memory = new SchemaMemory();
     this.model = model.bindTools(this.tools);
-    this.agent = this._buildGraph();
+    this.agent = this.#buildGraph().compile({
+      checkpointer: new SchemaMemory(),
+    });
   }
 
-  _buildGraph() {
+  #buildGraph() {
     const callModel = async (state) => {
       const prompt = ChatPromptTemplate.fromMessages([
         SystemMessagePromptTemplate.fromTemplate(this.systemPrompt),
@@ -53,7 +53,6 @@ export default class AgentService {
       return await tNode.invoke(state);
     }
 
-    const workflow = new StateGraph(MessagesAnnotation)
     const postToolNode = async (state) => {
       const lastToolMessage = state.messages[state.messages.length - 1];
       const contentText = lastToolMessage?.content || 'Инструмент не вернул данных';
@@ -76,17 +75,11 @@ export default class AgentService {
       });
     }
 
-    const workflow = new StateGraph(AgentState)
+    return new StateGraph(AgentState)
       .addNode('agent', callModel)
-      .addNode('tools', toolNode)
       .addNode('tools', customToolNode)
       .addNode('postTool', postToolNode)
       .addEdge('__start__', 'agent')
-      .addConditionalEdges(
-        'agent',
-        toolsCondition
-      )
-      .addEdge('tools', 'agent');
       .addConditionalEdges('agent', toolsCondition)
       .addEdge('tools', 'postTool')
 
