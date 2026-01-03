@@ -85,13 +85,33 @@ export default class SecretaryAI {
         description: tool.description,
         schema: new z.Schema(tool.schema),
         func: async (args) => {
-          const {content, artifact = {}} = await this.client.callTool({
+          const {content, isError, artifact = {}} = await this.client.callTool({
             name: tool.name,
             arguments: args,
           });
+          if (isError) {
+            /**
+             * @type {import("@langchain/core/messages").InvalidToolCall}
+             */
+            const brokenToolCall = {
+              type: 'invalid_tool_call',
+              args: JSON.stringify(args),
+              error: content,
+            };
+
+            return new ToolMessage({
+              name: tool.name,
+              tool_call_id: brokenToolCall.id,
+              metadata: args,
+              status: 'error',
+              content: 'Произошла ошибка',
+              artifact: artifact,
+            });
+          }
           return new ToolMessage({
             name: tool.name,
             content: content?.[0]?.text || 'Данные отсутствуют',
+            status: 'success',
             artifact: artifact,
           });
         },

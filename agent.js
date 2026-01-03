@@ -75,17 +75,18 @@ export default class AgentService {
       });
     }
 
+    const rollbackNode = async (state) => {
+    };
+
     return new StateGraph(AgentState)
       .addNode('agent', callModel)
       .addNode('tools', customToolNode)
       .addNode('postTool', postToolNode)
+      .addNode('rollback', rollbackNode)
       .addEdge('__start__', 'agent')
       .addConditionalEdges('agent', toolsCondition)
       .addEdge('tools', 'postTool')
-
-    return workflow.compile({
-      checkpointer: this.memory,
-    });
+      .addEdge('rollback', '__end__');
   }
 
   async execute(input, config = {}, options = {recursionLimit: 7}) {
