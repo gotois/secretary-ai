@@ -2,13 +2,14 @@
   "name": "secretary-ai",
   "version": "0.0.1",
   "scripts": {
-    "test": "node --test tests/*.test.mjs"
+    "test": "DEBUG=* & node --test tests/*.test.mjs"
   },
   "type": "module",
   "dependencies": {
-    "@langchain/core": "1.1.8",
+    "@langchain/core": "1.1.15",
     "@langchain/mcp-adapters": "1.1.1",
-    "@modelcontextprotocol/sdk": "1.25.1",
+    "@modelcontextprotocol/sdk": "1.25.2",
+    "debug": "4.4.3",
     "text-ld": "0.0.11"
   },
   "devDependencies": {

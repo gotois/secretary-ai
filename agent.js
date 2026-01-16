@@ -2,6 +2,7 @@ import {MessagesAnnotation, Command, Annotation, StateGraph} from '@langchain/la
 import {AIMessage} from '@langchain/core/messages';
 import {ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate} from '@langchain/core/prompts';
 import {ToolNode, toolsCondition} from '@langchain/langgraph/prebuilt';
+import debug from 'debug';
 
 import {SchemaMemory} from './memory.js';
 
@@ -41,24 +42,30 @@ export default class AgentService {
 
       const response = await chain.invoke({
         messages: state.messages,
-      })
+      });
+
+      debug.log('MODEL RESPONSE RAW ->', response);
 
       return {messages: [response]};
     };
 
     const customToolNode = async (state) => {
+      debug.log('TOOLS NODE: messages before tool invocation ->', state.messages);
+
       const tNode = new ToolNode(this.tools, {
         handleToolErrors: true,
       });
-      return await tNode.invoke(state);
+
+      const result = await tNode.invoke(state);
+      debug.log('TOOLS NODE: result after invocation ->', result);
+
+      return result;
     }
 
     const postToolNode = async (state) => {
       const lastToolMessage = state.messages[state.messages.length - 1];
-      const contentText = lastToolMessage?.content || 'Инструмент не вернул данных';
 
       const isError = lastToolMessage?.additional_kwargs?.is_error ||
-        lastToolMessage?.content?.includes('Error') ||
         lastToolMessage?.status === 'error';
 
       return new Command({
@@ -66,7 +73,15 @@ export default class AgentService {
           messages: [
             ...state.messages,
             new AIMessage({
-              content: contentText,
+              content: lastToolMessage?.content || 'Инструмент не вернул данных',
+              invalid_tool_calls: [
+                {
+                  name: lastToolMessage.name,
+                  args: '', // todo - здесь параметры приведшие к ошибке
+                  id: lastToolMessage.id,
+                  error: lastToolMessage.content ?? 'Произошла ошибка',
+                },
+              ],
             }),
           ],
           artifact: lastToolMessage?.artifact || {},
@@ -76,6 +91,11 @@ export default class AgentService {
     }
 
     const rollbackNode = async (state) => {
+      debug.log('ОШИБКА: Запуск отката транзакций...', state);
+      return {
+        undoStack: [],
+        messages: [{ role: 'assistant', content: 'Произошла техническая ошибка.' }]
+      };
     };
 
     return new StateGraph(AgentState)

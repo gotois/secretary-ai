@@ -53,9 +53,8 @@ export default class SecretaryAI {
         Ты — Виртуальный Секретарь
         :: Инструкции:
         - Если данных недостаточно — уточни их у пользователя. НЕ выдумывай информацию
-        - После каждого вызова инструмента кратко проверь результат (1-2 предложения) и продолжай только если всё корректно
-        Контекст:
-        - Текущее время ${this.timeZone}: ${this.currentDate}
+        :: Контекст:
+        - Время клиента: ${this.timeZone}: ${this.currentDate}
         :: Используй только доступные инструменты согласно allowed_tools. Не совершай разрушительных действий без подтверждения пользователя.
         `
       .replace(/\s+/g, ' ')
@@ -81,11 +80,11 @@ export default class SecretaryAI {
         description: tool.description,
         schema: new z.Schema(tool.schema),
         func: async (args) => {
-          const {content, isError, artifact = {}} = await this.client.callTool({
+          const {content, is_error, artifact = {}} = await this.client.callTool({
             name: tool.name,
             arguments: args,
           });
-          if (isError) {
+          if (is_error) {
             /**
              * @type {import("@langchain/core/messages").InvalidToolCall}
              */
