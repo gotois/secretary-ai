@@ -74,14 +74,14 @@ export default class AgentService {
             ...state.messages,
             new AIMessage({
               content: lastToolMessage?.content || 'Инструмент не вернул данных',
-              invalid_tool_calls: [
+              invalid_tool_calls: isError ? [
                 {
                   name: lastToolMessage.name,
                   args: '', // todo - здесь параметры приведшие к ошибке
                   id: lastToolMessage.id,
                   error: lastToolMessage.content ?? 'Произошла ошибка',
                 },
-              ],
+              ] : [],
             }),
           ],
           artifact: lastToolMessage?.artifact || {},

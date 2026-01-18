@@ -61,6 +61,22 @@ export default class SecretaryAI {
       .trim();
   }
 
+  static getDescriptionWithTags(input) {
+    const match = input.match(/^\[(.*?)\]\s*(.*)$/);
+
+    if (match) {
+      return {
+        tags: match[1].split(',').map(tag => tag.trim()),
+        description: match[2],
+      }
+    }
+
+    return {
+      tags: [],
+      description: input,
+    }
+  }
+
   async connect(serverName, headers) {
     const transport = new StreamableHTTPClientTransport(this.url, {
       requestInit: {
@@ -75,10 +91,14 @@ export default class SecretaryAI {
       useStandardContentBlocks: false,
     });
     for (const tool of tools) {
+      const {description, tags} = SecretaryAI.getDescriptionWithTags(tool.description);
       const t = new DynamicStructuredTool({
         name: tool.name,
-        description: tool.description,
+        description: description,
         schema: new z.Schema(tool.schema),
+        returnDirect: false,
+        tags: tags,
+        verbose: tool.verbose,
         func: async (args) => {
           const {content, is_error, artifact = {}} = await this.client.callTool({
             name: tool.name,
