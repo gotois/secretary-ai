@@ -118,6 +118,7 @@ export default class AgentService {
 
     const rollbackNode = async (state) => {
       debug.log('ОШИБКА: Запуск отката транзакций...', state);
+      const lastToolMessage = state.messages[state.messages.length - 1];
       return {
         undoStack: [],
         messages: [
