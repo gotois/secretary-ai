@@ -47,7 +47,7 @@ export class SchemaMemory extends BaseCheckpointSaver {
         .prepare(
           `SELECT checkpoint, metadata, parent_checkpoint_id, checkpoint_id FROM checkpoints
            WHERE thread_id = ? AND checkpoint_ns = ?
-           ORDER BY checkpoint_id DESC
+           ORDER BY updated_at DESC, checkpoint_id DESC
            LIMIT 1`
         )
         .get(thread_id, checkpoint_ns);
@@ -160,7 +160,7 @@ export class SchemaMemory extends BaseCheckpointSaver {
       query += ' WHERE ' + conditions.join(' AND ');
     }
 
-    query += ' ORDER BY checkpoint_id DESC';
+    query += ' ORDER BY updated_at DESC, checkpoint_id DESC';
 
     if (limit !== undefined) {
       query += ' LIMIT ?';

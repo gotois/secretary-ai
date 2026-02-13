@@ -2,12 +2,13 @@ import assert from 'node:assert';
 import {describe, test, beforeEach, afterEach} from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 import {SchemaMemory} from '../memory.js';
 import {emptyCheckpoint} from '@langchain/langgraph-checkpoint';
 
 describe('SchemaMemory SQLite Implementation', () => {
-  const testDbPath = '/tmp/test-schema-memory.sqlite';
+  const testDbPath = path.join(os.tmpdir(), 'test-schema-memory.sqlite');
 
   beforeEach(() => {
     // Clean up before each test
