@@ -1,5 +1,5 @@
 import {MessagesAnnotation, Command, Annotation, StateGraph} from '@langchain/langgraph';
-import {AIMessage} from '@langchain/core/messages';
+import {AIMessage, HumanMessage, RemoveMessage} from '@langchain/core/messages';
 import {ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate} from '@langchain/core/prompts';
 import {ToolNode, toolsCondition} from '@langchain/langgraph/prebuilt';
 import debug from 'debug';
@@ -14,7 +14,7 @@ const AgentState = Annotation.Root({
 });
 
 export default class AgentService {
-  constructor(model, tools, systemPrompt) {
+  constructor(model, tools, systemPrompt, db) {
     if (!model) {
       throw new Error('Model is not defined');
     }
@@ -28,7 +28,7 @@ export default class AgentService {
     this.systemPrompt = systemPrompt;
     this.model = model.bindTools(this.tools);
     this.agent = this.#buildGraph().compile({
-      checkpointer: new SchemaMemory(),
+      checkpointer: new SchemaMemory(db),
     });
   }
 
@@ -46,7 +46,9 @@ export default class AgentService {
 
       debug.log('MODEL RESPONSE RAW ->', response);
 
-      return {messages: [response]};
+      return {
+        messages: [response],
+      };
     };
 
     const customToolNode = async (state) => {
@@ -65,36 +67,65 @@ export default class AgentService {
     const postToolNode = async (state) => {
       const lastToolMessage = state.messages[state.messages.length - 1];
 
-      const isError = lastToolMessage?.additional_kwargs?.is_error ||
+      const isError = lastToolMessage?.additional_kwargs?.isError ||
         lastToolMessage?.status === 'error';
 
-      return new Command({
-        update: {
-          messages: [
-            ...state.messages,
-            new AIMessage({
-              content: lastToolMessage?.content || 'Инструмент не вернул данных',
-              invalid_tool_calls: isError ? [
-                {
-                  name: lastToolMessage.name,
-                  args: '', // todo - здесь параметры приведшие к ошибке
-                  id: lastToolMessage.id,
-                  error: lastToolMessage.content ?? 'Произошла ошибка',
-                },
-              ] : [],
-            }),
-          ],
+      if (isError) {
+        return new Command({
+          update: {
+            messages: [
+              ...state.messages,
+              new AIMessage({
+                content: lastToolMessage?.content || 'Инструмент не вернул данных',
+                invalid_tool_calls: [
+                  {
+                    name: lastToolMessage.name,
+                    args: '', // todo - здесь параметры приведшие к ошибке
+                    id: lastToolMessage.id,
+                    error: lastToolMessage.content ?? 'Произошла ошибка',
+                  },
+                ],
+              }),
+            ],
+            artifact: lastToolMessage?.artifact || {},
+          },
+          goto: 'rollback',
+        });
+      }
+
+      if (!lastToolMessage?.content) {
+        return new Command({
+          update: {
+            messages: [
+              new AIMessage({
+                content: 'Инструмент не вернул данных',
+                invalid_tool_calls: [],
+              }),
+            ],
+            artifact: lastToolMessage?.artifact || {},
+          },
+          goto: '__end__',
+        });
+      }
+
+       return new Command({
+         update: {
           artifact: lastToolMessage?.artifact || {},
-        },
-        goto: isError ? 'rollback' : '__end__',
-      });
+         },
+         goto: 'agent',
+       });
     }
 
     const rollbackNode = async (state) => {
       debug.log('ОШИБКА: Запуск отката транзакций...', state);
       return {
         undoStack: [],
-        messages: [{ role: 'assistant', content: 'Произошла техническая ошибка.' }]
+        messages: [
+          new AIMessage({
+            content: lastToolMessage.content || 'Произошла техническая ошибка.'
+          }),
+        ],
+        artifact: null,
       };
     };
 
@@ -109,13 +140,32 @@ export default class AgentService {
       .addEdge('rollback', '__end__');
   }
 
-  async execute(input, config = {}, options = {recursionLimit: 7}) {
+  async clearState({ configurable }) {
+    const currentState = await this.agent.getState({ configurable });
+    const messages = currentState.values.messages;
+
+    if (messages?.length === 0) {
+      return;
+    }
+    const deletions = messages.map((m) => new RemoveMessage({
+      id: m.id,
+    }));
+
+    await this.agent.updateState({
+      configurable,
+    }, {
+      messages: deletions,
+      artifact: null,
+    });
+  }
+
+  async execute(state, options = {}) {
     return this.agent.invoke({
-      messages: [{
-        role: 'user',
-        content: input.input,
-      }],
-      config,
-    }, options);
+      messages: [
+        new HumanMessage(state.input),
+      ],
+    }, {
+      ...options,
+    });
   }
 }

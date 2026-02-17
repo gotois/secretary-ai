@@ -1,12 +1,11 @@
-import {randomUUID} from 'node:crypto';
-
-import {DynamicStructuredTool} from "@langchain/core/tools";
-import {ToolMessage} from "@langchain/core/messages";
+import {DynamicStructuredTool} from '@langchain/core/tools';
+import {ToolMessage} from '@langchain/core/messages';
 import {loadMcpTools} from '@langchain/mcp-adapters';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {z} from 'zod';
 import textLD from 'text-ld';
+import debug from 'debug';
 
 import _pkg from './package.json' with {type: 'json'};
 import AgentService from './agent.js';
@@ -20,12 +19,13 @@ export default class SecretaryAI {
     version: _pkg.version,
   });
 
-  constructor(mcpServerUrl, model, lang) {
+  constructor(mcpServerUrl, serverName, model, db) {
     this.url = mcpServerUrl;
+    this.serverName = serverName;
     this.model = model;
-    this.lang = lang;
-    this.threadId = randomUUID();
     this.tools = [];
+    this._isConnected = false;
+    this.db = db;
   }
 
   get client() {
@@ -37,9 +37,9 @@ export default class SecretaryAI {
   }
 
   get currentDate() {
-    return new Intl.DateTimeFormat(this.lang, {
+    return new Intl.DateTimeFormat('ru', {
       year: 'numeric',
-      month: 'short',
+      month: 'long',
       day: 'numeric',
       hour: 'numeric',
       minute: 'numeric',
@@ -54,7 +54,7 @@ export default class SecretaryAI {
         :: Инструкции:
         - Если данных недостаточно — уточни их у пользователя. НЕ выдумывай информацию
         :: Контекст:
-        - Время клиента: ${this.timeZone}: ${this.currentDate}
+        - Время клиента: ${this.currentDate} - ${this.timeZone}
         :: Используй только доступные инструменты согласно allowed_tools. Не совершай разрушительных действий без подтверждения пользователя.
         `
       .replace(/\s+/g, ' ')
@@ -77,14 +77,8 @@ export default class SecretaryAI {
     }
   }
 
-  async connect(serverName, headers) {
-    const transport = new StreamableHTTPClientTransport(this.url, {
-      requestInit: {
-        headers: headers,
-      },
-    });
-    await this.client.connect(transport);
-    const tools = await loadMcpTools(serverName, this.client, {
+  async #loadTools() {
+    const tools = await loadMcpTools(this.serverName, this.client, {
       throwOnLoadError: true,
       prefixToolNameWithServerName: false,
       additionalToolNamePrefix: '',
@@ -100,11 +94,25 @@ export default class SecretaryAI {
         tags: tags,
         verbose: tool.verbose,
         func: async (args) => {
-          const {content, is_error, artifact = {}} = await this.client.callTool({
-            name: tool.name,
-            arguments: args,
-          });
-          if (is_error) {
+          let data;
+          try {
+            data = await this.client.callTool({
+              name: tool.name,
+              arguments: args,
+            });
+          } catch (error) {
+            if ([401, 407, 451].includes(error.code)) {
+              this._isConnected = false;
+            }
+            return new ToolMessage({
+              name: tool.name,
+              content: 'Произошла ошибка сети. Попробуйте заново',
+              status: 'error',
+              artifact: {},
+            });
+          }
+          const {content, isError, artifact = {}} = data;
+          if (isError) {
             /**
              * @type {import("@langchain/core/messages").InvalidToolCall}
              */
@@ -125,7 +133,7 @@ export default class SecretaryAI {
           }
           return new ToolMessage({
             name: tool.name,
-            content: content?.[0]?.text || 'Данные отсутствуют',
+            content: content?.[0]?.text || 'Нет данных',
             status: 'success',
             artifact: artifact,
           });
@@ -133,11 +141,42 @@ export default class SecretaryAI {
       });
       this.tools.push(t);
     }
-
-    this.agent = new AgentService(this.model, this.tools, this.systemPrompt);
   }
 
-  async chat(query, context) {
+  get isConnected() {
+    return this._isConnected;
+  }
+
+  async connect(headers = {}) {
+    debug.log('connecting...');
+    const transport = new StreamableHTTPClientTransport(this.url, {
+      requestInit: {
+        headers: {
+          ...headers,
+          'User-Agent': 'Secretary-Agent/0.0.1',
+          'Accept': 'text/plain;q=0.9,text/html;q=0.8,*/*;q=0.7',
+          'Content-Type': 'application/json',
+        },
+      },
+    });
+    await this.client.connect(transport);
+    await this.#loadTools();
+    this._agent = new AgentService(this.model, this.tools, this.systemPrompt, this.db);
+    this._isConnected = true;
+  }
+
+  get agent() {
+    return this._agent;
+  }
+
+  async transcription(fileId) {
+    const transcriptionData = await this.client.readResource({
+      uri: `transcription://${fileId}`,
+    });
+    return transcriptionData.contents[0].text;
+  }
+
+  async chat(query, config = {}) {
     if (query.length <= MIN_QUERY_LENGTH) {
       throw new Error('Запрос не должен быть пустым');
     }
@@ -146,19 +185,28 @@ export default class SecretaryAI {
     }
     const {text} = await textLD.creativeWork(query, this.timeZone);
 
-    const {messages, artifact} = await this.agent.execute({
+    if (!this.isConnected) {
+      await this.connect(config.headers);
+    }
+
+    const { messages, artifact } = await this.agent.execute({
       input: text,
     }, {
-      configurable: {
-        thread_id: this.threadId,
-      },
-      context: context,
+      recursionLimit: config.recursionLimit || 7,
+      configurable: config.configurable,
+      callbacks: [], // todo - настроить consoleHandler и Debug для логов и подсчета стоимости
+      tags: [], // todo - настроить тегов для экспериментов или указания например что это telegram
+      metadata: config.metadata,
     });
+    const lastMessage = messages[messages.length - 1];
+    if (artifact) {
+      await this.agent.clearState(config);
+    }
 
     return {
       content: [{
         type: 'text',
-        text: messages[messages.length - 1].content,
+        text: lastMessage.content,
       }],
       artifact: artifact,
     };

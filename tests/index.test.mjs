@@ -19,13 +19,10 @@ describe('Secretary MCP API', () => {
 
   beforeEach(async () => {
     if (!secretaryAI) {
-      secretaryAI = new SecretaryAI(process.env.SECRETARY_MCP_URL, model, 'ru-RU');
-      await secretaryAI.connect(
-        'secretary-mcp-server',
-        {
-          'Authorization': `Basic ${authString}`,
-        },
-      );
+      secretaryAI = new SecretaryAI(process.env.SECRETARY_MCP_URL, process.env.SECRETARY_MCP_NAME, model);
+      await secretaryAI.connect({
+        'Authorization': `Basic ${authString}`,
+      });
     }
   });
 
@@ -33,7 +30,15 @@ describe('Secretary MCP API', () => {
     let query =
       'Привет!';
 
-    const {content} = await secretaryAI.chat(query, {user_id: '1'});
+    const {content} = await secretaryAI.chat(query, {
+      configurable: {
+        thread_id: '1',
+        tenant_id: 'test',
+      },
+      headers: {
+        'Accept-Language': 'ru-RU',
+      },
+    });
     assert.ok(content[0].type === 'text');
   });
 });

@@ -1,14 +1,13 @@
 import {BaseCheckpointSaver} from '@langchain/langgraph-checkpoint';
 import {DatabaseSync} from 'node:sqlite';
-import path from 'node:path';
 
 export class SchemaMemory extends BaseCheckpointSaver {
   #db;
 
-  constructor(dbPath = path.resolve('./memory.sqlite')) {
+  constructor(db = new DatabaseSync(':memory:')) {
     super();
 
-    this.#db = new DatabaseSync(dbPath);
+    this.#db = db;
 
     this.#db.exec(`
       CREATE TABLE IF NOT EXISTS checkpoints (
@@ -42,7 +41,6 @@ export class SchemaMemory extends BaseCheckpointSaver {
         )
         .get(thread_id, checkpoint_ns, checkpoint_id);
     } else {
-      // Get latest checkpoint
       row = this.#db
         .prepare(
           `SELECT checkpoint, metadata, parent_checkpoint_id, checkpoint_id FROM checkpoints
@@ -53,7 +51,9 @@ export class SchemaMemory extends BaseCheckpointSaver {
         .get(thread_id, checkpoint_ns);
     }
 
-    if (!row) return undefined;
+    if (!row) {
+      return undefined;
+    }
 
     const deserializedCheckpoint = await this.serde.loadsTyped('json', row.checkpoint);
     const deserializedMetadata = await this.serde.loadsTyped('json', row.metadata);
