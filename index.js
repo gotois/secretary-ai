@@ -149,12 +149,15 @@ export default class SecretaryAI {
 
   async connect(headers = {}) {
     debug.log('connecting...');
+    await this.client.close();
+    this._isConnected = false;
+
     const transport = new StreamableHTTPClientTransport(this.url, {
       requestInit: {
         headers: {
           ...headers,
-          'User-Agent': 'Secretary-Agent/0.0.1',
-          'Accept': 'text/plain;q=0.9,text/html;q=0.8,*/*;q=0.7',
+          'User-Agent': `${_pkg.name}/${_pkg.version}`,
+          'Accept': 'text/markdown;q=0.9,text/plain;q=0.8,text/html;q=0.7,*/*;q=0.5',
           'Content-Type': 'application/json',
         },
       },
@@ -183,7 +186,7 @@ export default class SecretaryAI {
     if (query.length > MAX_QUERY_LENGTH) {
       throw new Error(`Запрос должен быть не более ${MAX_QUERY_LENGTH} символов`);
     }
-    const {text} = await textLD.creativeWork(query, this.timeZone);
+    const {text} = textLD.creativeWork(query);
 
     if (!this.isConnected) {
       await this.connect(config.headers);
