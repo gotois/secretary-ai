@@ -162,8 +162,14 @@ export default class SecretaryAI {
         },
       },
     });
-    await this.client.connect(transport);
-    await this.#loadTools();
+    try {
+      await this.client.connect(transport);
+      await this.#loadTools();
+    } catch (error) {
+      debug.log(error);
+      this._isConnected = false;
+      throw error;
+    }
     this._agent = new AgentService(this.model, this.tools, this.systemPrompt, this.db);
     this._isConnected = true;
   }
