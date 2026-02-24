@@ -1,5 +1,5 @@
 import {MessagesAnnotation, Command, Annotation, StateGraph} from '@langchain/langgraph';
-import {AIMessage, HumanMessage, RemoveMessage} from '@langchain/core/messages';
+import {AIMessage, HumanMessage, RemoveMessage, ToolMessage} from '@langchain/core/messages';
 import {ChatPromptTemplate, MessagesPlaceholder, SystemMessagePromptTemplate} from '@langchain/core/prompts';
 import {ToolNode, toolsCondition} from '@langchain/langgraph/prebuilt';
 import debug from 'debug';
@@ -34,10 +34,21 @@ export default class AgentService {
 
   #buildGraph() {
     const callModel = async (state) => {
-      const prompt = ChatPromptTemplate.fromMessages([
-        SystemMessagePromptTemplate.fromTemplate(this.systemPrompt),
-        new MessagesPlaceholder('messages'),
-      ]);
+      let prompt;
+
+      const lastMessage = state.messages[state.messages.length - 1];
+      if (lastMessage instanceof ToolMessage) {
+        const template = `:: Результат выполненного инструмента с ответом для пользователя:\n${lastMessage.content}`;
+        prompt = ChatPromptTemplate.fromMessages([
+          SystemMessagePromptTemplate.fromTemplate(this.systemPrompt + template),
+        ]);
+      } else {
+        prompt = ChatPromptTemplate.fromMessages([
+          SystemMessagePromptTemplate.fromTemplate(this.systemPrompt),
+          new MessagesPlaceholder('messages'),
+        ]);
+      }
+
       const chain = prompt.pipe(this.model);
 
       const response = await chain.invoke({
@@ -52,7 +63,7 @@ export default class AgentService {
     };
 
     const customToolNode = async (state) => {
-      debug.log('TOOLS NODE: messages before tool invocation ->', state.messages);
+      debug.log('TOOLS NODE: messages before tool invocation ->', state);
 
       const tNode = new ToolNode(this.tools, {
         handleToolErrors: true,
@@ -64,8 +75,8 @@ export default class AgentService {
       return result;
     }
 
-    const postToolNode = async (state) => {
-      const lastToolMessage = state.messages[state.messages.length - 1];
+    const postToolNode = async ({ messages }) => {
+      const lastToolMessage = messages[messages.length - 1];
 
       const isError = lastToolMessage?.additional_kwargs?.isError ||
         lastToolMessage?.status === 'error';
@@ -74,17 +85,17 @@ export default class AgentService {
         return new Command({
           update: {
             messages: [
-              ...state.messages,
+              ...messages,
               new AIMessage({
                 content: lastToolMessage?.content || 'Инструмент не вернул данных',
-                invalid_tool_calls: [
+                invalid_tool_calls: lastToolMessage ? [
                   {
                     name: lastToolMessage.name,
                     args: '', // todo - здесь параметры приведшие к ошибке
                     id: lastToolMessage.id,
                     error: lastToolMessage.content ?? 'Произошла ошибка',
                   },
-                ],
+                ] : [],
               }),
             ],
             artifact: lastToolMessage?.artifact || {},
@@ -108,12 +119,12 @@ export default class AgentService {
         });
       }
 
-       return new Command({
-         update: {
+      return new Command({
+        update: {
           artifact: lastToolMessage?.artifact || {},
-         },
-         goto: 'agent',
-       });
+        },
+        goto: 'agent',
+      });
     }
 
     const rollbackNode = async (state) => {

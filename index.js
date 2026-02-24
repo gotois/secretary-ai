@@ -147,19 +147,18 @@ export default class SecretaryAI {
     return this._isConnected;
   }
 
-  async connect(headers = {}) {
+  async connect(headers = new Headers()) {
     debug.log('connecting...');
     await this.client.close();
     this._isConnected = false;
 
+    headers.set('User-Agent', `${_pkg.name}/${_pkg.version}`);
+    headers.set('Accept', 'text/markdown;q=0.9,text/plain;q=0.8,text/html;q=0.7,*/*;q=0.5');
+    headers.set('Content-Type', 'application/json');
+
     const transport = new StreamableHTTPClientTransport(this.url, {
       requestInit: {
-        headers: {
-          ...headers,
-          'User-Agent': `${_pkg.name}/${_pkg.version}`,
-          'Accept': 'text/markdown;q=0.9,text/plain;q=0.8,text/html;q=0.7,*/*;q=0.5',
-          'Content-Type': 'application/json',
-        },
+        headers,
       },
     });
     try {

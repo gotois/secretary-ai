@@ -17,9 +17,10 @@ export class SchemaMemory extends BaseCheckpointSaver {
         checkpoint TEXT NOT NULL,
         metadata TEXT NOT NULL,
         parent_checkpoint_id TEXT,
+        created_at INTEGER DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-      );
+      ) STRICT
     `);
   }
 
