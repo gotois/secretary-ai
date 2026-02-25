@@ -108,10 +108,10 @@ export default class SecretaryAI {
               name: tool.name,
               content: 'Произошла ошибка сети. Попробуйте заново',
               status: 'error',
-              artifact: {},
+              artifact: [],
             });
           }
-          const {content, isError, artifact = {}} = data;
+          const {content, isError, artifact = []} = data;
           if (isError) {
             /**
              * @type {import("@langchain/core/messages").InvalidToolCall}
@@ -216,7 +216,7 @@ export default class SecretaryAI {
         type: 'text',
         text: lastMessage.content,
       }],
-      artifact: artifact,
+      artifact: artifact || [],
     };
   }
 }

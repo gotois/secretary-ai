@@ -9,7 +9,7 @@ import {SchemaMemory} from './memory.js';
 const AgentState = Annotation.Root({
   ...MessagesAnnotation.spec,
   artifact: Annotation({
-    default: () => null,
+    default: () => [],
   }),
 });
 
@@ -33,14 +33,16 @@ export default class AgentService {
   }
 
   #buildGraph() {
-    const callModel = async (state) => {
+    const callModel = async ({ messages }) => {
       let prompt;
 
-      const lastMessage = state.messages[state.messages.length - 1];
-      if (lastMessage instanceof ToolMessage) {
-        const template = `:: Результат выполненного инструмента с ответом для пользователя:\n${lastMessage.content}`;
+      const firstMessage = messages[0];
+      const lastMessage = messages[messages.length - 1];
+      if (firstMessage instanceof HumanMessage && lastMessage instanceof ToolMessage) {
+        const template = `Сформируй итоговый ответ для пользователя:\n${lastMessage.content}`;
         prompt = ChatPromptTemplate.fromMessages([
-          SystemMessagePromptTemplate.fromTemplate(this.systemPrompt + template),
+          SystemMessagePromptTemplate.fromTemplate(template),
+          new MessagesPlaceholder('messages'),
         ]);
       } else {
         prompt = ChatPromptTemplate.fromMessages([
@@ -52,7 +54,7 @@ export default class AgentService {
       const chain = prompt.pipe(this.model);
 
       const response = await chain.invoke({
-        messages: state.messages,
+        messages,
       });
 
       debug.log('MODEL RESPONSE RAW ->', response);
@@ -64,6 +66,11 @@ export default class AgentService {
 
     const customToolNode = async (state) => {
       debug.log('TOOLS NODE: messages before tool invocation ->', state);
+
+      // if (response.tool_calls.length === 0) {
+      //   debug.log('TOOLS NODE: skipping tool invocation.');
+      //   return state;
+      // }
 
       const tNode = new ToolNode(this.tools, {
         handleToolErrors: true,
@@ -98,7 +105,7 @@ export default class AgentService {
                 ] : [],
               }),
             ],
-            artifact: lastToolMessage?.artifact || {},
+            artifact: lastToolMessage?.artifact || [],
           },
           goto: 'rollback',
         });
@@ -113,7 +120,7 @@ export default class AgentService {
                 invalid_tool_calls: [],
               }),
             ],
-            artifact: lastToolMessage?.artifact || {},
+            artifact: lastToolMessage?.artifact || [],
           },
           goto: '__end__',
         });
@@ -121,38 +128,23 @@ export default class AgentService {
 
       return new Command({
         update: {
-          artifact: lastToolMessage?.artifact || {},
+          artifact: lastToolMessage?.artifact || [],
         },
         goto: 'agent',
       });
     }
 
-    const rollbackNode = async (state) => {
-      debug.log('ОШИБКА: Запуск отката транзакций...', state);
-      const lastToolMessage = state.messages[state.messages.length - 1];
-      return {
-        undoStack: [],
-        messages: [
-          new AIMessage({
-            content: lastToolMessage.content || 'Произошла техническая ошибка.'
-          }),
-        ],
-        artifact: null,
-      };
-    };
-
     return new StateGraph(AgentState)
       .addNode('agent', callModel)
       .addNode('tools', customToolNode)
       .addNode('postTool', postToolNode)
-      .addNode('rollback', rollbackNode)
       .addEdge('__start__', 'agent')
       .addConditionalEdges('agent', toolsCondition)
-      .addEdge('tools', 'postTool')
-      .addEdge('rollback', '__end__');
+      .addEdge('tools', 'postTool');
   }
 
   async clearState({ configurable }) {
+    debug.log('CLEAR STATE');
     const currentState = await this.agent.getState({ configurable });
     const messages = currentState.values.messages;
 
@@ -167,7 +159,7 @@ export default class AgentService {
       configurable,
     }, {
       messages: deletions,
-      artifact: null,
+      artifact: [],
     });
   }
 

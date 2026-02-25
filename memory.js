@@ -14,8 +14,8 @@ export class SchemaMemory extends BaseCheckpointSaver {
         thread_id TEXT NOT NULL,
         checkpoint_ns TEXT NOT NULL,
         checkpoint_id TEXT NOT NULL,
-        checkpoint TEXT NOT NULL,
-        metadata TEXT NOT NULL,
+        checkpoint BLOB NOT NULL,
+        metadata BLOB NOT NULL,
         parent_checkpoint_id TEXT,
         created_at INTEGER DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL,
@@ -85,11 +85,10 @@ export class SchemaMemory extends BaseCheckpointSaver {
     return checkpointTuple;
   }
 
-  // todo - в качестве идеи - сохранять контекст согласно спецификации Schema.org/Action
   async put(config, checkpoint, metadata) {
     const thread_id = config.configurable?.thread_id;
-    const checkpoint_ns = config.configurable?.checkpoint_ns ?? '';
-    const parent_checkpoint_id = config.configurable?.checkpoint_id;
+    const checkpoint_ns = String(config.configurable?.checkpoint_ns ?? '');
+    const parent_checkpoint_id = config.configurable?.checkpoint_id || null;
 
     if (!thread_id) {
       throw new Error('Failed to put checkpoint. The passed RunnableConfig is missing a required "thread_id" field in its "configurable" property.');
@@ -99,6 +98,7 @@ export class SchemaMemory extends BaseCheckpointSaver {
       this.serde.dumpsTyped(checkpoint),
       this.serde.dumpsTyped(metadata),
     ]);
+    const checkpoint_id = checkpoint.id;
 
     this.#db
       .prepare(
@@ -114,10 +114,10 @@ export class SchemaMemory extends BaseCheckpointSaver {
       .run(
         thread_id,
         checkpoint_ns,
-        checkpoint.id,
+        checkpoint_id,
         serializedCheckpoint,
         serializedMetadata,
-        parent_checkpoint_id || null,
+        parent_checkpoint_id,
         Date.now()
       );
 
@@ -125,7 +125,7 @@ export class SchemaMemory extends BaseCheckpointSaver {
       configurable: {
         thread_id,
         checkpoint_ns,
-        checkpoint_id: checkpoint.id,
+        checkpoint_id,
       },
     };
   }
