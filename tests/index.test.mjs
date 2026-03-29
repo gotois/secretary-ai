@@ -20,9 +20,9 @@ describe('Secretary MCP API', () => {
   beforeEach(async () => {
     if (!secretaryAI) {
       secretaryAI = new SecretaryAI(process.env.SECRETARY_MCP_URL, process.env.SECRETARY_MCP_NAME, model);
-      await secretaryAI.connect({
-        'Authorization': `Basic ${authString}`,
-      });
+      const headers = new Headers();
+      headers.append('Authorization', `Basic ${authString}`);
+      await secretaryAI.connect(headers);
     }
   });
 
