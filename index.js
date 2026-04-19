@@ -22,6 +22,9 @@ export default class SecretaryAI {
   constructor(mcpServerUrl, serverName, model, db) {
     this.url = mcpServerUrl;
     this.serverName = serverName;
+    if (!model.bindTools) {
+      throw new Error('Missing model bindTools');
+    }
     this.model = model;
     this.tools = [];
     this._isConnected = false;
@@ -148,7 +151,7 @@ export default class SecretaryAI {
   }
 
   async connect(headers = new Headers()) {
-    debug.log('connecting...');
+    debug.log('connecting...', headers);
     await this.client.close();
     this._isConnected = false;
 
