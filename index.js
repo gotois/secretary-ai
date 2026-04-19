@@ -203,7 +203,7 @@ export default class SecretaryAI {
     const { messages, artifact } = await this.agent.execute({
       input: text,
     }, {
-      recursionLimit: config.recursionLimit || 7,
+      recursionLimit: 10,
       configurable: config.configurable,
       callbacks: [], // todo - настроить consoleHandler и Debug для логов и подсчета стоимости
       tags: [], // todo - настроить тегов для экспериментов или указания например что это telegram
