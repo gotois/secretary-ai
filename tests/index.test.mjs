@@ -2,7 +2,9 @@ import assert from 'node:assert';
 import {beforeEach, describe, test} from 'node:test';
 
 import 'dotenv/config';
-import {LangChainYandexGPT} from 'langchain-yandexgpt';
+// import {LangChainYandexGPT} from 'langchain-yandexgpt';
+import {LangChainYandexGPT} from '../../langchain-yandexgpt/index.mjs';
+import {ChatOpenAI} from "@langchain/openai";
 
 import SecretaryAI from '../index.js';
 
@@ -12,9 +14,6 @@ describe('Secretary MCP API', () => {
 
   const model = new LangChainYandexGPT({
     temperature: 0,
-    apiKey: process.env.YC_API_KEY,
-    folderID: process.env.YC_IAM_TOKEN,
-    model: 'yandexgpt-lite',
   });
 
   beforeEach(async () => {

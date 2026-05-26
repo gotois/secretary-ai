@@ -2,6 +2,11 @@
 
 ## Installation
 
+```bash
+npx npmrc-replace-env
+npm i
+```
+
 ENV:
 
 ```shell

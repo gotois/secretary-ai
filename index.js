@@ -10,6 +10,8 @@ import debug from 'debug';
 import _pkg from './package.json' with {type: 'json'};
 import AgentService from './agent.js';
 
+const metadataSchema = z.record(z.string(), z.unknown()).optional();
+
 const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 256;
 
@@ -44,8 +46,6 @@ export default class SecretaryAI {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric',
       hour12: false,
       timeZone: this.timeZone,
     }).format(new Date());
@@ -57,7 +57,8 @@ export default class SecretaryAI {
         :: Инструкции:
         - Если данных недостаточно — уточни их у пользователя. НЕ выдумывай информацию
         :: Контекст:
-        - Время клиента: ${this.currentDate} - ${this.timeZone}
+        - Дата клиента: ${this.currentDate}
+        - Таймзона: ${this.timeZone}
         :: Используй только доступные инструменты согласно allowed_tools. Не совершай разрушительных действий без подтверждения пользователя.
         `
       .replace(/\s+/g, ' ')
@@ -151,7 +152,7 @@ export default class SecretaryAI {
   }
 
   async connect(headers = new Headers()) {
-    debug.log('connecting...', headers);
+    debug.log('connecting... headers:', [...headers.keys()]);
     await this.client.close();
     this._isConnected = false;
 
@@ -180,11 +181,8 @@ export default class SecretaryAI {
     return this._agent;
   }
 
-  async transcription(fileId) {
-    const transcriptionData = await this.client.readResource({
-      uri: `transcription://${fileId}`,
-    });
-    return transcriptionData.contents[0].text;
+  async clear(config) {
+    await this.agent.clearState(config);
   }
 
   async chat(query, config = {}) {
@@ -207,12 +205,9 @@ export default class SecretaryAI {
       configurable: config.configurable,
       callbacks: [], // todo - настроить consoleHandler и Debug для логов и подсчета стоимости
       tags: [], // todo - настроить тегов для экспериментов или указания например что это telegram
-      metadata: config.metadata,
+      metadata: metadataSchema.parse(config.metadata),
     });
     const lastMessage = messages[messages.length - 1];
-    if (artifact) {
-      await this.agent.clearState(config);
-    }
 
     return {
       content: [{

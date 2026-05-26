@@ -11,6 +11,9 @@ const AgentState = Annotation.Root({
   artifact: Annotation({
     default: () => [],
   }),
+  thread_id: Annotation({
+    default: () => null,
+  }),
 });
 
 export default class AgentService {
@@ -27,26 +30,40 @@ export default class AgentService {
     this.tools = tools;
     this.systemPrompt = systemPrompt;
     this.model = model.bindTools(this.tools);
-    this.agent = this.#buildGraph().compile({
-      checkpointer: new SchemaMemory(db),
+    this.memory = new SchemaMemory(db);
+    this.agent = this.#buildGraph(this.memory).compile({
+      checkpointer: this.memory,
     });
   }
 
-  #buildGraph() {
-    const callModel = async ({ messages }) => {
+  #buildGraph(memory) {
+    const callModel = async ({ messages, thread_id }) => {
+      // Поиск релевантного контекста из истории треда
+      let historyContext = '';
+      if (thread_id) {
+        const lastHuman = [...messages].reverse().find(m => m instanceof HumanMessage);
+        if (lastHuman) {
+          const results = memory.search(thread_id, typeof lastHuman.content === 'string' ? lastHuman.content : JSON.stringify(lastHuman.content));
+          if (results.length > 0) {
+            const lines = results.map(r => `[${r.role}]: ${r.content}`).join('\n');
+            historyContext = `\n## Контекст из истории:\n${lines}`;
+          }
+        }
+      }
+
       let prompt;
 
       const firstMessage = messages[0];
       const lastMessage = messages[messages.length - 1];
       if (firstMessage instanceof HumanMessage && lastMessage instanceof ToolMessage) {
-        const template = `Сформируй итоговый ответ для пользователя:\n${lastMessage.content}`;
+        const template = `Сформируй итоговый ответ для пользователя:\n${lastMessage.content}${historyContext}`;
         prompt = ChatPromptTemplate.fromMessages([
           SystemMessagePromptTemplate.fromTemplate(template),
           new MessagesPlaceholder('messages'),
         ]);
       } else {
         prompt = ChatPromptTemplate.fromMessages([
-          SystemMessagePromptTemplate.fromTemplate(this.systemPrompt),
+          SystemMessagePromptTemplate.fromTemplate(this.systemPrompt + historyContext),
           new MessagesPlaceholder('messages'),
         ]);
       }
@@ -67,10 +84,11 @@ export default class AgentService {
     const customToolNode = async (state) => {
       debug.log('TOOLS NODE: messages before tool invocation ->', state);
 
-      // if (response.tool_calls.length === 0) {
-      //   debug.log('TOOLS NODE: skipping tool invocation.');
-      //   return state;
-      // }
+      const lastMessage = state.messages[state.messages.length - 1];
+      if (!lastMessage?.tool_calls?.length) {
+        debug.log('TOOLS NODE: skipping tool invocation.');
+        return state;
+      }
 
       const tNode = new ToolNode(this.tools, {
         handleToolErrors: true,
@@ -134,13 +152,25 @@ export default class AgentService {
       });
     }
 
+    const rollbackNode = () => {
+      return {
+        messages: [
+          new AIMessage({
+            content: 'Произошла ошибка. Попробуйте ещё раз.',
+          }),
+        ],
+      };
+    };
+
     return new StateGraph(AgentState)
       .addNode('agent', callModel)
       .addNode('tools', customToolNode)
       .addNode('postTool', postToolNode)
+      .addNode('rollback', rollbackNode)
       .addEdge('__start__', 'agent')
       .addConditionalEdges('agent', toolsCondition)
-      .addEdge('tools', 'postTool');
+      .addEdge('tools', 'postTool')
+      .addEdge('rollback', '__end__');
   }
 
   async clearState({ configurable }) {
@@ -168,6 +198,7 @@ export default class AgentService {
       messages: [
         new HumanMessage(state.input),
       ],
+      thread_id: options.configurable?.thread_id ?? null,
     }, {
       ...options,
     });

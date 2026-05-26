@@ -1,5 +1,6 @@
 import {BaseCheckpointSaver} from '@langchain/langgraph-checkpoint';
 import {DatabaseSync} from 'node:sqlite';
+import {createIndex, serializeIndex, deserializeIndex} from './lib/minisearch.mjs';
 
 export class SchemaMemory extends BaseCheckpointSaver {
   #db;
@@ -22,6 +23,54 @@ export class SchemaMemory extends BaseCheckpointSaver {
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
       ) STRICT
     `);
+
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS search_indexes (
+        thread_id TEXT PRIMARY KEY,
+        index_data TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT
+    `);
+  }
+
+  indexMessage(thread_id, {id, role, content}) {
+    if (!id || !content) return;
+
+    const row = this.#db
+      .prepare(`SELECT index_data FROM search_indexes WHERE thread_id = ?`)
+      .get(thread_id);
+
+    const ms = row ? deserializeIndex(row.index_data) : createIndex();
+
+    // TODO: дедупликация — проверять ms.has(id) перед добавлением
+    ms.add({id, role, content});
+
+    this.#db
+      .prepare(
+        `INSERT INTO search_indexes (thread_id, index_data, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(thread_id)
+         DO UPDATE SET index_data = excluded.index_data, updated_at = excluded.updated_at`
+      )
+      .run(thread_id, serializeIndex(ms), Date.now());
+  }
+
+  search(thread_id, query) {
+    if (!query || !thread_id) return [];
+
+    const row = this.#db
+      .prepare(`SELECT index_data FROM search_indexes WHERE thread_id = ?`)
+      .get(thread_id);
+
+    if (!row) return [];
+
+    const ms = deserializeIndex(row.index_data);
+
+    return ms.search(query, {
+      fuzzy: 0.2,
+      prefix: true,
+      limit: 3,
+    });
   }
 
   async getTuple(config) {
@@ -120,6 +169,14 @@ export class SchemaMemory extends BaseCheckpointSaver {
         parent_checkpoint_id,
         Date.now()
       );
+
+    // Индексируем новые сообщения из чекпоинта для поиска по истории
+    const messages = checkpoint.channel_values?.messages ?? [];
+    for (const msg of messages) {
+      const role = msg._getType?.() ?? msg.role ?? 'unknown';
+      const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      this.indexMessage(thread_id, {id: msg.id, role, content});
+    }
 
     return {
       configurable: {
