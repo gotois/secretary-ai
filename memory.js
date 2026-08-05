@@ -1,4 +1,8 @@
-import {BaseCheckpointSaver} from '@langchain/langgraph-checkpoint';
+import {
+  BaseCheckpointSaver,
+  WRITES_IDX_MAP,
+  copyCheckpoint,
+} from '@langchain/langgraph-checkpoint';
 import {DatabaseSync} from 'node:sqlite';
 import {createIndex, serializeIndex, deserializeIndex} from './lib/minisearch.mjs';
 
@@ -16,11 +20,30 @@ export class SchemaMemory extends BaseCheckpointSaver {
         checkpoint_ns TEXT NOT NULL,
         checkpoint_id TEXT NOT NULL,
         checkpoint BLOB NOT NULL,
+        checkpoint_type TEXT NOT NULL DEFAULT 'json',
         metadata BLOB NOT NULL,
+        metadata_type TEXT NOT NULL DEFAULT 'json',
         parent_checkpoint_id TEXT,
         created_at INTEGER DEFAULT (unixepoch()),
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      ) STRICT
+    `);
+
+    this.#ensureColumn('checkpoints', 'checkpoint_type', `TEXT NOT NULL DEFAULT 'json'`);
+    this.#ensureColumn('checkpoints', 'metadata_type', `TEXT NOT NULL DEFAULT 'json'`);
+
+    this.#db.exec(`
+      CREATE TABLE IF NOT EXISTS checkpoint_writes (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL,
+        checkpoint_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        write_index INTEGER NOT NULL,
+        channel TEXT NOT NULL,
+        value BLOB NOT NULL,
+        value_type TEXT NOT NULL DEFAULT 'json',
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, write_index)
       ) STRICT
     `);
 
@@ -33,17 +56,46 @@ export class SchemaMemory extends BaseCheckpointSaver {
     `);
   }
 
-  indexMessage(thread_id, {id, role, content}) {
-    if (!id || !content) return;
+  #ensureColumn(table, column, definition) {
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!columns.some(current => current.name === column)) {
+      this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  }
+
+  async #getPendingWrites(threadId, checkpointNs, checkpointId) {
+    const rows = this.#db
+      .prepare(
+        `SELECT task_id, channel, value, value_type
+         FROM checkpoint_writes
+         WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?
+         ORDER BY task_id, write_index`
+      )
+      .all(threadId, checkpointNs, checkpointId);
+
+    return Promise.all(rows.map(async row => {
+      return [
+        row.task_id,
+        row.channel,
+        await this.serde.loadsTyped(row.value_type, row.value),
+      ];
+    }));
+  }
+
+  indexMessage(threadId, {id, role, content}) {
+    if (!id || !content) {
+      return;
+    }
 
     const row = this.#db
       .prepare(`SELECT index_data FROM search_indexes WHERE thread_id = ?`)
-      .get(thread_id);
+      .get(threadId);
 
-    const ms = row ? deserializeIndex(row.index_data) : createIndex();
-
-    // TODO: дедупликация — проверять ms.has(id) перед добавлением
-    ms.add({id, role, content});
+    const miniSearch = row ? deserializeIndex(row.index_data) : createIndex();
+    if (miniSearch.has(id)) {
+      return;
+    }
+    miniSearch.add({id, role, content});
 
     this.#db
       .prepare(
@@ -52,80 +104,91 @@ export class SchemaMemory extends BaseCheckpointSaver {
          ON CONFLICT(thread_id)
          DO UPDATE SET index_data = excluded.index_data, updated_at = excluded.updated_at`
       )
-      .run(thread_id, serializeIndex(ms), Date.now());
+      .run(threadId, serializeIndex(miniSearch), Date.now());
   }
 
-  search(thread_id, query) {
-    if (!query || !thread_id) return [];
+  search(threadId, query, {excludeIds = []} = {}) {
+    if (!query || !threadId) {
+      return [];
+    }
 
     const row = this.#db
       .prepare(`SELECT index_data FROM search_indexes WHERE thread_id = ?`)
-      .get(thread_id);
+      .get(threadId);
 
-    if (!row) return [];
+    if (!row) {
+      return [];
+    }
 
-    const ms = deserializeIndex(row.index_data);
+    const excluded = new Set(excludeIds.filter(Boolean));
+    const miniSearch = deserializeIndex(row.index_data);
 
-    return ms.search(query, {
+    return miniSearch.search(query, {
       fuzzy: 0.2,
       prefix: true,
-      limit: 3,
-    });
+    })
+      .filter(result => !excluded.has(result.id))
+      .slice(0, 3);
   }
 
   async getTuple(config) {
-    const thread_id = config.configurable?.thread_id;
-    const checkpoint_ns = config.configurable?.checkpoint_ns ?? '';
-    const checkpoint_id = config.configurable?.checkpoint_id;
+    const threadId = config.configurable?.thread_id;
+    const checkpointNs = config.configurable?.checkpoint_ns ?? '';
+    const checkpointId = config.configurable?.checkpoint_id;
 
-    if (!thread_id) {
+    if (!threadId) {
       return undefined;
     }
 
     let row;
-    if (checkpoint_id) {
+    if (checkpointId) {
       row = this.#db
         .prepare(
-          `SELECT checkpoint, metadata, parent_checkpoint_id FROM checkpoints
+          `SELECT checkpoint_id, checkpoint, checkpoint_type, metadata, metadata_type, parent_checkpoint_id
+           FROM checkpoints
            WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?`
         )
-        .get(thread_id, checkpoint_ns, checkpoint_id);
+        .get(threadId, checkpointNs, checkpointId);
     } else {
       row = this.#db
         .prepare(
-          `SELECT checkpoint, metadata, parent_checkpoint_id, checkpoint_id FROM checkpoints
+          `SELECT checkpoint_id, checkpoint, checkpoint_type, metadata, metadata_type, parent_checkpoint_id
+           FROM checkpoints
            WHERE thread_id = ? AND checkpoint_ns = ?
            ORDER BY updated_at DESC, checkpoint_id DESC
            LIMIT 1`
         )
-        .get(thread_id, checkpoint_ns);
+        .get(threadId, checkpointNs);
     }
 
     if (!row) {
       return undefined;
     }
 
-    const deserializedCheckpoint = await this.serde.loadsTyped('json', row.checkpoint);
-    const deserializedMetadata = await this.serde.loadsTyped('json', row.metadata);
+    const [checkpoint, metadata, pendingWrites] = await Promise.all([
+      this.serde.loadsTyped(row.checkpoint_type, row.checkpoint),
+      this.serde.loadsTyped(row.metadata_type, row.metadata),
+      this.#getPendingWrites(threadId, checkpointNs, row.checkpoint_id),
+    ]);
 
     const checkpointTuple = {
-      config: checkpoint_id ? config : {
+      config: {
         configurable: {
-          thread_id,
-          checkpoint_ns,
+          thread_id: threadId,
+          checkpoint_ns: checkpointNs,
           checkpoint_id: row.checkpoint_id,
         },
       },
-      checkpoint: deserializedCheckpoint,
-      metadata: deserializedMetadata,
-      pendingWrites: [],
+      checkpoint,
+      metadata,
+      pendingWrites,
     };
 
     if (row.parent_checkpoint_id) {
       checkpointTuple.parentConfig = {
         configurable: {
-          thread_id,
-          checkpoint_ns,
+          thread_id: threadId,
+          checkpoint_ns: checkpointNs,
           checkpoint_id: row.parent_checkpoint_id,
         },
       };
@@ -134,80 +197,153 @@ export class SchemaMemory extends BaseCheckpointSaver {
     return checkpointTuple;
   }
 
-  async put(config, checkpoint, metadata) {
-    const thread_id = config.configurable?.thread_id;
-    const checkpoint_ns = String(config.configurable?.checkpoint_ns ?? '');
-    const parent_checkpoint_id = config.configurable?.checkpoint_id || null;
+  async put(config, checkpoint, metadata, _newVersions) {
+    const threadId = config.configurable?.thread_id;
+    const checkpointNs = String(config.configurable?.checkpoint_ns ?? '');
+    const parentCheckpointId = config.configurable?.checkpoint_id || null;
 
-    if (!thread_id) {
+    if (!threadId) {
       throw new Error('Failed to put checkpoint. The passed RunnableConfig is missing a required "thread_id" field in its "configurable" property.');
     }
 
-    const [[, serializedCheckpoint], [, serializedMetadata]] = await Promise.all([
-      this.serde.dumpsTyped(checkpoint),
+    const preparedCheckpoint = copyCheckpoint(checkpoint);
+    const [
+      [checkpointType, serializedCheckpoint],
+      [metadataType, serializedMetadata],
+    ] = await Promise.all([
+      this.serde.dumpsTyped(preparedCheckpoint),
       this.serde.dumpsTyped(metadata),
     ]);
-    const checkpoint_id = checkpoint.id;
+    const checkpointId = preparedCheckpoint.id;
 
     this.#db
       .prepare(
-        `INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata, parent_checkpoint_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO checkpoints (
+           thread_id, checkpoint_ns, checkpoint_id,
+           checkpoint, checkpoint_type, metadata, metadata_type,
+           parent_checkpoint_id, updated_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id)
          DO UPDATE SET
            checkpoint = excluded.checkpoint,
+           checkpoint_type = excluded.checkpoint_type,
            metadata = excluded.metadata,
+           metadata_type = excluded.metadata_type,
            parent_checkpoint_id = excluded.parent_checkpoint_id,
            updated_at = excluded.updated_at`
       )
       .run(
-        thread_id,
-        checkpoint_ns,
-        checkpoint_id,
+        threadId,
+        checkpointNs,
+        checkpointId,
         serializedCheckpoint,
+        checkpointType,
         serializedMetadata,
-        parent_checkpoint_id,
+        metadataType,
+        parentCheckpointId,
         Date.now()
       );
 
-    // Индексируем новые сообщения из чекпоинта для поиска по истории
-    const messages = checkpoint.channel_values?.messages ?? [];
-    for (const msg of messages) {
-      const role = msg._getType?.() ?? msg.role ?? 'unknown';
-      const content = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
-      this.indexMessage(thread_id, {id: msg.id, role, content});
+    const messages = preparedCheckpoint.channel_values?.messages ?? [];
+    for (const message of messages) {
+      const role = message._getType?.() ?? message.role ?? 'unknown';
+      const content = typeof message.content === 'string' ?
+        message.content :
+        JSON.stringify(message.content);
+      this.indexMessage(threadId, {
+        id: message.id,
+        role,
+        content,
+      });
     }
 
     return {
       configurable: {
-        thread_id,
-        checkpoint_ns,
-        checkpoint_id,
+        thread_id: threadId,
+        checkpoint_ns: checkpointNs,
+        checkpoint_id: checkpointId,
       },
     };
   }
 
   async putWrites(config, writes, taskId) {
-    // Обычно writes не нужны для SQLite memory
-    // но хук обязателен
+    const threadId = config.configurable?.thread_id;
+    const checkpointNs = config.configurable?.checkpoint_ns ?? '';
+    const checkpointId = config.configurable?.checkpoint_id;
+
+    if (!threadId) {
+      throw new Error('Failed to put writes. The passed RunnableConfig is missing a required "thread_id" field.');
+    }
+    if (!checkpointId) {
+      throw new Error('Failed to put writes. The passed RunnableConfig is missing a required "checkpoint_id" field.');
+    }
+
+    for (const [index, [channel, value]] of writes.entries()) {
+      const writeIndex = WRITES_IDX_MAP[channel] ?? index;
+      const [valueType, serializedValue] = await this.serde.dumpsTyped(value);
+      const values = [
+        threadId,
+        checkpointNs,
+        checkpointId,
+        taskId,
+        writeIndex,
+        channel,
+        serializedValue,
+        valueType,
+      ];
+
+      if (writeIndex >= 0) {
+        this.#db
+          .prepare(
+            `INSERT OR IGNORE INTO checkpoint_writes (
+               thread_id, checkpoint_ns, checkpoint_id, task_id,
+               write_index, channel, value, value_type
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(...values);
+      } else {
+        this.#db
+          .prepare(
+            `INSERT INTO checkpoint_writes (
+               thread_id, checkpoint_ns, checkpoint_id, task_id,
+               write_index, channel, value, value_type
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(thread_id, checkpoint_ns, checkpoint_id, task_id, write_index)
+             DO UPDATE SET
+               channel = excluded.channel,
+               value = excluded.value,
+               value_type = excluded.value_type`
+          )
+          .run(...values);
+      }
+    }
   }
 
   async* list(config, options) {
     const {before, limit, filter} = options ?? {};
-    const thread_id = config.configurable?.thread_id;
-    const checkpoint_ns = config.configurable?.checkpoint_ns ?? '';
+    const threadId = config.configurable?.thread_id;
+    const checkpointNs = config.configurable?.checkpoint_ns;
 
-    let query = `SELECT thread_id, checkpoint_ns, checkpoint_id, checkpoint, metadata, parent_checkpoint_id FROM checkpoints`;
+    let query = `
+      SELECT
+        thread_id, checkpoint_ns, checkpoint_id,
+        checkpoint, checkpoint_type, metadata, metadata_type,
+        parent_checkpoint_id
+      FROM checkpoints
+    `;
     const params = [];
-
     const conditions = [];
-    if (thread_id) {
+
+    if (threadId) {
       conditions.push('thread_id = ?');
-      params.push(thread_id);
+      params.push(threadId);
     }
-    if (checkpoint_ns) {
+    if (checkpointNs !== undefined) {
       conditions.push('checkpoint_ns = ?');
-      params.push(checkpoint_ns);
+      params.push(checkpointNs);
     }
     if (before?.configurable?.checkpoint_id) {
       conditions.push('checkpoint_id < ?');
@@ -215,7 +351,7 @@ export class SchemaMemory extends BaseCheckpointSaver {
     }
 
     if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
+      query += ` WHERE ${conditions.join(' AND ')}`;
     }
 
     query += ' ORDER BY updated_at DESC, checkpoint_id DESC';
@@ -228,10 +364,13 @@ export class SchemaMemory extends BaseCheckpointSaver {
     const rows = this.#db.prepare(query).all(...params);
 
     for (const row of rows) {
-      const deserializedCheckpoint = await this.serde.loadsTyped('json', row.checkpoint);
-      const deserializedMetadata = await this.serde.loadsTyped('json', row.metadata);
+      const [checkpoint, metadata, pendingWrites] = await Promise.all([
+        this.serde.loadsTyped(row.checkpoint_type, row.checkpoint),
+        this.serde.loadsTyped(row.metadata_type, row.metadata),
+        this.#getPendingWrites(row.thread_id, row.checkpoint_ns, row.checkpoint_id),
+      ]);
 
-      if (filter && !Object.entries(filter).every(([key, value]) => deserializedMetadata[key] === value)) {
+      if (filter && !Object.entries(filter).every(([key, value]) => metadata[key] === value)) {
         continue;
       }
 
@@ -243,9 +382,9 @@ export class SchemaMemory extends BaseCheckpointSaver {
             checkpoint_id: row.checkpoint_id,
           },
         },
-        checkpoint: deserializedCheckpoint,
-        metadata: deserializedMetadata,
-        pendingWrites: [],
+        checkpoint,
+        metadata,
+        pendingWrites,
       };
 
       if (row.parent_checkpoint_id) {
@@ -262,7 +401,24 @@ export class SchemaMemory extends BaseCheckpointSaver {
     }
   }
 
+  async deleteThread(threadId) {
+    this.#db.exec('BEGIN');
+    try {
+      this.#db.prepare(`DELETE FROM checkpoint_writes WHERE thread_id = ?`).run(threadId);
+      this.#db.prepare(`DELETE FROM checkpoints WHERE thread_id = ?`).run(threadId);
+      this.#db.prepare(`DELETE FROM search_indexes WHERE thread_id = ?`).run(threadId);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   clear() {
-    this.#db.exec(`DELETE FROM checkpoints`);
+    this.#db.exec(`
+      DELETE FROM checkpoint_writes;
+      DELETE FROM checkpoints;
+      DELETE FROM search_indexes;
+    `);
   }
 }
